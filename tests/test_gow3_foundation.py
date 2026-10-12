@@ -10,7 +10,6 @@ from unittest.mock import patch
 import cache_key
 import game_check
 import import_coverage
-import link_modules
 import package_release
 
 
@@ -31,15 +30,6 @@ class ValidationTests(unittest.TestCase):
             first=cache_key.cache_key(root)
             (root/cache_key.INPUTS[1]).write_bytes(b'changed')
             self.assertNotEqual(first,cache_key.cache_key(root))
-
-    def test_video_arena_patch_is_strict_and_cache_only(self):
-        image=bytearray(link_modules.VIDEO_ARENA_OFFSET+4)
-        self.assertTrue(link_modules.apply_gow3_runtime_defaults(image))
-        self.assertEqual(image[link_modules.VIDEO_ARENA_OFFSET:],bytes.fromhex('00000090'))
-        self.assertFalse(link_modules.apply_gow3_runtime_defaults(image))
-        image[link_modules.VIDEO_ARENA_OFFSET:]=bytes.fromhex('01000000')
-        with self.assertRaisesRegex(ValueError,'unexpected video-arena word'):
-            link_modules.apply_gow3_runtime_defaults(image)
 
     def test_texture_profile_reserves_required_additional_dmem(self):
         launcher=(ROOT/'run.bat').read_text(encoding='utf-8')
@@ -84,13 +74,16 @@ class CoverageTests(unittest.TestCase):
         self.assertIn('AV_CODEC_ID_AAC',ajm)
         self.assertIn('ffmpeg_frame(in,&input,&in_size,&out,&written,&internal)',ajm)
 
-    def test_gow3_fast_readback_profile_avoids_per_image_gpu_finish(self):
+    def test_launch_profile_selects_precise_readbacks_with_fast_mode_opt_in(self):
         settings=(ROOT/'gpu/shim/core/emulator_settings.h').read_text(encoding='utf-8')
         texture=(ROOT/'gpu/shadps4/video_core/texture_cache/texture_cache.cpp').read_text(
             encoding='utf-8')
         launcher=(ROOT/'run.bat').read_text(encoding='utf-8')
         self.assertIn('Number("GOW3R_READBACKS", GpuReadbacksMode::Disabled)',settings)
-        self.assertIn('if not defined GOW3R_READBACKS set "GOW3R_READBACKS=0"',launcher)
+        self.assertIn('if not defined GOW3R_READBACKS set "GOW3R_READBACKS=2"',launcher)
+        self.assertIn('if not defined GOW3R_READBACK_LINEAR set "GOW3R_READBACK_LINEAR=1"',launcher)
+        self.assertIn('if not defined GOW3R_DIRECT_MEMORY_ACCESS set "GOW3R_DIRECT_MEMORY_ACCESS=0"',launcher)
+        self.assertIn('readbacks=2', (ROOT/'gow3r.ini').read_text(encoding='utf-8'))
         self.assertIn('const bool sync = EmulatorSettings.GetReadbacksMode() !=',texture)
         self.assertIn('DownloadImageMemory(image_id, sync);',texture)
 

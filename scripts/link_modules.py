@@ -21,29 +21,6 @@ from link_libc import encode_id
 
 DEFAULT_MODULES = ('libc.prx', 'libSceFios2.prx')
 FS_LOAD = bytes.fromhex('64488b042500000000')  # mov rax, fs:[0]
-VIDEO_ARENA_OFFSET = 0x007CD918
-VIDEO_ARENA_ORIGINAL = bytes.fromhex('00000000')
-VIDEO_ARENA_2304_MIB = bytes.fromhex('00000090')
-
-
-def apply_gow3_runtime_defaults(image):
-    """Apply version-locked runtime constants without modifying the user's dump.
-
-    CUSA01623 1.02 leaves this BSS word zero and derives a much smaller video arena.
-    The tested GoW3 renderer profile uses 0x90000000 bytes (2.25 GiB / 2304 MiB), which avoids
-    the game recycling render resources while Vulkan still has aliased views alive.
-    """
-    end = VIDEO_ARENA_OFFSET + len(VIDEO_ARENA_ORIGINAL)
-    if end > len(image):
-        raise ValueError('CUSA01623 1.02 image is too small for the video-arena patch')
-    current = bytes(image[VIDEO_ARENA_OFFSET:end])
-    if current == VIDEO_ARENA_2304_MIB:
-        return False
-    if current != VIDEO_ARENA_ORIGINAL:
-        raise ValueError(
-            f'unexpected video-arena word at {VIDEO_ARENA_OFFSET:#x}: {current.hex()}')
-    image[VIDEO_ARENA_OFFSET:end] = VIDEO_ARENA_2304_MIB
-    return True
 
 
 def module(path):
@@ -249,7 +226,6 @@ def link(game, out, module_names=DEFAULT_MODULES):
                      or main_tls['vaddr'] + main_tls['filesz'] > size):
         raise ValueError('unsupported eboot TLS layout')
     procparam = next(p for p in main['ph'] if p['type'] == 0x61000001)
-    video_arena_patched = apply_gow3_runtime_defaults(image)
     with (out / 'boot-linked.bin').open('wb') as f:
         f.write(struct.pack('<8s6Q', b'GOW3IMG1', len(image), entry, len(segments), len(relocs), len(names), flags))
         f.write(struct.pack('<Q', procparam['vaddr']))
@@ -276,15 +252,12 @@ def link(game, out, module_names=DEFAULT_MODULES):
                                      and len(by_nid.get((identity[0], 'libc'), [])) == 1)]
     report = dict(format='GOW3IMG1', modules=[{k: (hex(v) if k in ('base', 'init', 'tls_address') else v) for k, v in t.items()} for t in table],
                   bindings=len(bindings), imports=len(names), fs_loads_patched=fs_patched,
-                  video_arena=dict(offset=hex(VIDEO_ARENA_OFFSET), bytes=0x90000000,
-                                   patched=video_arena_patched),
                   main_tls=dict(zip(('vaddr', 'filesz', 'memsz', 'align'), main_tls_values)),
                   unresolved_imports=canonical_unresolved)
     (out / 'link.json').write_text(json.dumps(report, indent=2) + '\n')
     summary = ', '.join(f"{t['file']}@{t['base']:#x}" for t in table)
     print(f'Linked modules: {summary}; {len(bindings)} native bindings, {len(unresolved)} imports left to the host runtime, '
           f'fs->gs patched={fs_patched}')
-    print('GoW3R video arena: 2.25 GiB / 2304 MiB (cache-only patch at 0x007cd918)')
 
 
 if __name__ == '__main__':

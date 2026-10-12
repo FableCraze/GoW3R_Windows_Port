@@ -14,7 +14,7 @@ ROOT_FILES = ('LICENSE', 'README.md', 'CONTRIBUTING.md',
               'gow3r.ini', 'run.bat', 'launch_gui.bat', 'launcher.py')
 SCRIPT_FILES = ('prepare.py', 'link_modules.py', 'game_check.py', 'cache_key.py',
                 'content_profile.py', 'import_coverage.py', 'patches.py')
-PATCH_FILES = ('God_of_War_III_Remastered.xml',)
+PATCH_FILES = ('God_of_War_III_Remastered.xml', 'README.md')
 
 
 def reject(path):

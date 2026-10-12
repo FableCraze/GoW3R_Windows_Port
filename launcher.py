@@ -16,6 +16,7 @@ SETTINGS_FILE = ROOT / 'launcher_settings.json'
 RESOLUTIONS = ('1280x720', '1920x1080')
 sys.path.insert(0, str(ROOT / 'scripts'))
 import game_check  # noqa: E402
+import patches as gow_patches  # noqa: E402
 
 
 def load_settings(path: Path = SETTINGS_FILE):
@@ -26,26 +27,42 @@ def load_settings(path: Path = SETTINGS_FILE):
         return {}
 
 
-def launch_options(resolution: str, fullscreen: bool, skip_intro: bool, skip_video: bool):
+def launch_options(resolution: str, fullscreen: bool, skip_intro: bool, skip_video: bool,
+                   video_patch: str = gow_patches.TEXTURE_FIX, fps_120: bool = False):
     """Translate launcher controls to the runtime's stable environment interface."""
     if resolution not in RESOLUTIONS:
         resolution = '1920x1080'
     width, height = resolution.split('x')
-    return {
+    if video_patch not in (*gow_patches.VIDEO_PROFILES, gow_patches.NO_VIDEO_PATCH):
+        raise ValueError(f'Patch de vídeo desconhecido: {video_patch}')
+    selected = [] if video_patch == gow_patches.NO_VIDEO_PATCH else [video_patch]
+    if fps_120:
+        selected.append(gow_patches.FPS_120)
+    options = {
         'GOW3R_INTERNAL_WIDTH': width,
         'GOW3R_INTERNAL_HEIGHT': height,
         'GOW3R_FULLSCREEN': '1' if fullscreen else '0',
         'GOW3R_PATCH_SKIP_INTRO': '1' if skip_intro else '0',
         'GOW3R_PATCH_SKIP_VIDEO': '1' if skip_video else '0',
+        'GOW3R_PATCHES': ';'.join(selected) or 'none',
+        'GOW3R_VBLANK_HZ': '60',
+        'GOW3R_FPS_LIMIT': '60',
+        # Precise readbacks are required for the vegetation/textures on Gaia.
+        # Keep explicit environment overrides available for diagnostic runs.
+        'GOW3R_READBACKS': os.environ.get('GOW3R_READBACKS', '2'),
+        'GOW3R_READBACK_LINEAR': os.environ.get('GOW3R_READBACK_LINEAR', '1'),
+        'GOW3R_DIRECT_MEMORY_ACCESS': os.environ.get('GOW3R_DIRECT_MEMORY_ACCESS', '0'),
     }
+    options.update(gow_patches.runtime_options(selected))
+    return options
 
 
 class Launcher(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('GoW3R Windows Port')
-        self.geometry('760x570')
-        self.minsize(680, 530)
+        self.geometry('860x690')
+        self.minsize(780, 640)
         saved = load_settings()
         default_game = ROOT.parent / 'CUSA01623 GoW3Remaster 1.02'
         self.game = tk.StringVar(value=os.environ.get(
@@ -64,9 +81,25 @@ class Launcher(tk.Tk):
             'GOW3R_PATCH_SKIP_INTRO', str(int(bool(saved.get('skip_intro', False))))) == '1')
         self.skip_video = tk.BooleanVar(value=os.environ.get(
             'GOW3R_PATCH_SKIP_VIDEO', str(int(bool(saved.get('skip_video', False))))) == '1')
+        self.patch_catalog = gow_patches.catalog()
+        self.video_patch_names = (gow_patches.NO_VIDEO_PATCH,) + tuple(
+            name for name in gow_patches.VIDEO_PROFILES if name in self.patch_catalog)
+        selected_env = os.environ.get('GOW3R_PATCHES', '').split(';')
+        profile = next((name for name in selected_env if name in self.video_patch_names),
+                       saved.get('video_patch', gow_patches.TEXTURE_FIX))
+        if selected_env == ['none']:
+            profile = gow_patches.NO_VIDEO_PATCH
+        self.video_patch = tk.StringVar(value=profile if profile in self.video_patch_names
+                                        else gow_patches.TEXTURE_FIX)
+        self.fps_120 = tk.BooleanVar(value=(gow_patches.FPS_120 in selected_env
+                                    if 'GOW3R_PATCHES' in os.environ
+                                    else bool(saved.get('fps_120', False))))
+        self.patch_summary = tk.StringVar()
         self.status = tk.StringVar(value='Selecione e valide o dump descriptografado.')
         self.process: subprocess.Popen | None = None
         self._build_ui()
+        self.video_patch.trace_add('write', self.update_patch_controls)
+        self.update_patch_controls()
 
     def _build_ui(self):
         frame = ttk.Frame(self, padding=18)
@@ -87,17 +120,26 @@ class Launcher(tk.Tk):
         options.grid(row=5, column=0, columnspan=3, sticky='ew', pady=(18, 4))
         patches = ttk.LabelFrame(options, text='Patches opcionais', padding=10)
         patches.pack(side='left', fill='both', expand=True, padx=(0, 8))
+        ttk.Label(patches, text='Texturas / resolução do jogo (selecione somente um)').pack(anchor='w')
+        ttk.Combobox(patches, textvariable=self.video_patch, values=self.video_patch_names,
+                     state='readonly', width=43).pack(fill='x', pady=(4, 6))
+        ttk.Label(patches, textvariable=self.patch_summary, wraplength=430).pack(anchor='w')
+        ttk.Button(patches, text='Detalhes do patch', command=self.show_patch_details).pack(
+            anchor='w', pady=(6, 8))
         ttk.Checkbutton(patches, text='Pular introdução', variable=self.skip_intro).pack(
             anchor='w')
         ttk.Checkbutton(patches, text='Pular qualquer vídeo com o botão X',
                         variable=self.skip_video).pack(anchor='w', pady=(6, 0))
+        ttk.Checkbutton(patches, text='120 FPS (VBlank 120 Hz)', variable=self.fps_120).pack(
+            anchor='w', pady=(6, 0))
         video = ttk.LabelFrame(options, text='Vídeo', padding=10)
         video.pack(side='left', fill='both', expand=True)
-        ttk.Label(video, text='Resolução').grid(row=0, column=0, sticky='w', padx=(0, 8))
-        ttk.Combobox(video, textvariable=self.resolution, values=RESOLUTIONS,
-                     state='readonly', width=14).grid(row=0, column=1, sticky='w')
+        ttk.Label(video, text='Resolução do renderer').grid(row=0, column=0, sticky='w')
+        self.resolution_combo = ttk.Combobox(video, textvariable=self.resolution,
+                                             values=RESOLUTIONS, state='readonly', width=14)
+        self.resolution_combo.grid(row=1, column=0, sticky='w', pady=(4, 0))
         ttk.Checkbutton(video, text='Tela cheia', variable=self.fullscreen).grid(
-            row=1, column=0, columnspan=2, sticky='w', pady=(8, 0))
+            row=2, column=0, columnspan=2, sticky='w', pady=(8, 0))
         actions = ttk.Frame(frame)
         actions.grid(row=6, column=0, columnspan=3, sticky='w', pady=14)
         ttk.Button(actions, text='Validar', command=self.validate).pack(side='left')
@@ -114,6 +156,38 @@ class Launcher(tk.Tk):
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(9, weight=1)
 
+    def update_patch_controls(self, *_):
+        name = self.video_patch.get()
+        resolution_patch = name.startswith('Resolution Patch - ')
+        if name in gow_patches.VIDEO_PROFILES:
+            width, height, additional = gow_patches.VIDEO_PROFILES[name]
+            if resolution_patch:
+                output = f'{width}x{height}'
+                self.resolution_combo.configure(values=(output,), state='disabled')
+                self.resolution.set(output)
+            self.patch_summary.set(
+                f'Saída do jogo: {width}×{height}. Memória direta total: ao menos '
+                f'{5056 + additional} MiB ({additional} MiB adicionais), ajustada automaticamente.')
+        else:
+            self.patch_summary.set('Video Arena e resolução do jogo originais, sem patch gráfico.')
+        if not resolution_patch:
+            self.resolution_combo.configure(values=RESOLUTIONS, state='readonly')
+            if self.resolution.get() not in RESOLUTIONS:
+                self.resolution.set('1920x1080')
+
+    def show_patch_details(self):
+        names = [self.video_patch.get()]
+        if self.fps_120.get():
+            names.append(gow_patches.FPS_120)
+        details = []
+        for name in names:
+            metadata = self.patch_catalog.get(name)
+            if metadata:
+                details.append(f"{name}\nAutor: {metadata.get('Author', '')}\n"
+                               f"{metadata.get('Note', '')}")
+        messagebox.showinfo('Patches — CUSA01623 01.02', '\n\n'.join(details)
+                            or 'Nenhum patch gráfico selecionado.')
+
     def save_settings(self):
         data = {
             'game': self.game.get(),
@@ -122,6 +196,8 @@ class Launcher(tk.Tk):
             'fullscreen': self.fullscreen.get(),
             'skip_intro': self.skip_intro.get(),
             'skip_video': self.skip_video.get(),
+            'video_patch': self.video_patch.get(),
+            'fps_120': self.fps_120.get(),
         }
         try:
             SETTINGS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n',
@@ -166,14 +242,20 @@ class Launcher(tk.Tk):
         if not self.validate():
             messagebox.showerror('Dump incompatível', self.status.get())
             return
+        try:
+            options = launch_options(self.resolution.get(), self.fullscreen.get(),
+                                     self.skip_intro.get(), self.skip_video.get(),
+                                     self.video_patch.get(), self.fps_120.get())
+        except ValueError as error:
+            messagebox.showerror('Patches incompatíveis', str(error))
+            return
         Path(self.user.get()).mkdir(parents=True, exist_ok=True)
         self.save_settings()
         env = os.environ.copy()
         env.update(GOW3R_GAME_DIR=self.game.get(), GOW3R_USER_DIR=self.user.get(),
                    GOW3R_DATA_DIR=str(ROOT), GOW3R_CONFIG=str(ROOT / 'gow3r.ini'),
                    PYTHON=sys.executable, PYTHONUTF8='1', PYTHONIOENCODING='utf-8')
-        env.update(launch_options(self.resolution.get(), self.fullscreen.get(),
-                                  self.skip_intro.get(), self.skip_video.get()))
+        env.update(options)
         self.launch_button.configure(state='disabled')
         self.write('\nPreparando imagem e verificando contratos…\n')
         self.process = subprocess.Popen([str(ROOT / 'run.bat'), self.game.get()], cwd=ROOT,

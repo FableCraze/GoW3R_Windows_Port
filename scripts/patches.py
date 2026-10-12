@@ -6,6 +6,7 @@ writes are accepted; pattern patches are rejected deliberately.
 
 import argparse
 import json
+import os
 import struct
 import sys
 import xml.etree.ElementTree as ET
@@ -16,6 +17,60 @@ ROOT = Path(__file__).resolve().parent.parent
 EBOOT_BASE = 0x400000
 GOW3R_TITLE_IDS = {"CUSA01623", "CUSA01715"}
 DEFAULT_XML = ROOT / "patches" / "God_of_War_III_Remastered.xml"
+TEXTURE_FIX = "Bug Fix - Texture Corruption Fix"
+FPS_120 = "Frame Rate Patch - 120 FPS"
+NO_VIDEO_PATCH = "Sem patch de textura/resolução"
+# DMEM in the fork is additional to the retail 5056 MiB pool. This runtime uses
+# a total budget, so translate the XML requirements before launching.
+VIDEO_PROFILES = {
+    TEXTURE_FIX: (1920, 1080, 2048),
+    "Resolution Patch - 480p": (854, 480, 2048),
+    "Resolution Patch - 720p": (1280, 720, 2048),
+    "Resolution Patch - 1440p": (2560, 1440, 3072),
+    "Resolution Patch - 1800p": (3200, 1800, 4608),
+    "Resolution Patch - 4K": (3840, 2160, 6144),
+}
+
+
+def catalog(xml=DEFAULT_XML, app_version="01.02"):
+    """Return the version-compatible eboot patches, preserving XML metadata."""
+    root = ET.parse(xml).getroot()
+    title_ids = {item.text.strip() for item in root.iter("ID") if item.text}
+    if not title_ids & GOW3R_TITLE_IDS:
+        raise ValueError("patch XML does not target God of War III Remastered")
+    return {
+        item.get("Name"): dict(item.attrib)
+        for item in root.iter("Metadata")
+        if item.get("AppVer") == app_version
+        and item.get("AppElf", "eboot.bin") == "eboot.bin"
+        and item.get("Name")
+    }
+
+
+def validate_selection(names):
+    profiles = [name for name in names if name in VIDEO_PROFILES]
+    if len(profiles) > 1:
+        raise ValueError("choose only one texture/resolution patch: " + "; ".join(profiles))
+
+
+def runtime_options(names, dmem_mb=7104):
+    """Compute the memory, output size and timing required by selected patches."""
+    validate_selection(names)
+    budget = int(dmem_mb)
+    options = {}
+    for name in names:
+        if name in VIDEO_PROFILES:
+            width, height, additional = VIDEO_PROFILES[name]
+            budget = max(budget, 5056 + additional)
+            if name != TEXTURE_FIX:
+                options.update(GOW3R_INTERNAL_WIDTH=str(width),
+                               GOW3R_INTERNAL_HEIGHT=str(height))
+        if name == FPS_120:
+            options.update(GOW3R_VBLANK_HZ="120", GOW3R_FPS_LIMIT="120")
+    if not 5056 <= budget <= 16384:
+        raise ValueError("total direct memory budget must be between 5056 and 16384 MiB")
+    options["GOW3R_DMEM_MB"] = str(budget)
+    return options
 
 
 def eboot_segments(elf):
@@ -49,6 +104,7 @@ def encode(line):
 
 
 def compile_patches(xml, names, app_version, segments):
+    validate_selection(names)
     found = {}
     for metadata in ET.parse(xml).getroot().iter("Metadata"):
         if (
@@ -67,11 +123,7 @@ def compile_patches(xml, names, app_version, segments):
             offset = int(line.get("Address"), 0) - EBOOT_BASE
             data = encode(line)
             if not any(start <= offset and offset + len(data) <= end for start, end in segments):
-                print(
-                    f"Warning: {name}: address {line.get('Address')} is outside the eboot; skipping",
-                    file=sys.stderr,
-                )
-                continue
+                raise ValueError(f"{name}: address {line.get('Address')} is outside the eboot")
             writes.append((offset, data))
     return writes
 
@@ -141,15 +193,21 @@ def main():
     parser.add_argument("--patches-dir", type=Path, help="third-party patch XML directory")
     parser.add_argument("--patches-config", type=Path, help="JSON enabled/disabled selection")
     parser.add_argument("--out", type=Path, default=ROOT / "out")
+    parser.add_argument("--runtime-env", type=Path,
+                        help="write a CMD file containing numeric runtime requirements")
     args = parser.parse_args()
 
     names = []
     for name in (item.strip() for item in args.extra.split(";")):
-        if name and name not in names:
+        if name and name.lower() != "none" and name not in names:
             names.append(name)
 
-    segments = eboot_segments((args.out / "eboot.elf").read_bytes())
-    writes = compile_patches(args.xml, names, args.app_version, segments)
+    try:
+        segments = eboot_segments((args.out / "eboot.elf").read_bytes())
+        writes = compile_patches(args.xml, names, args.app_version, segments)
+        options = runtime_options(names, os.environ.get("GOW3R_DMEM_MB", "7104"))
+    except (ValueError, OSError, ET.ParseError, struct.error) as error:
+        parser.error(str(error))
     if args.patches_dir:
         found = external_patches(args.patches_dir, args.app_version, args.xml)
         writes += compile_external(external_selection(found, args.patches_config), segments)
@@ -160,6 +218,12 @@ def main():
         blob += struct.pack("<QQ", offset, len(data)) + data
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "patches.bin").write_bytes(blob)
+    if args.runtime_env:
+        # All names are fixed above and all values are numeric. Never put XML
+        # names, notes or arbitrary environment text into executable CMD syntax.
+        lines = ["@echo off"] + [f'set "{key}={int(value)}"' for key, value in options.items()]
+        args.runtime_env.write_text("\n".join(lines) + "\n", encoding="ascii")
+    print("Patch runtime requirements: " + ", ".join(f"{key}={value}" for key, value in options.items()))
     print(f"GoW3R patches: {', '.join(names) if names else 'none'}; {len(writes)} writes")
 
 

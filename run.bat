@@ -28,8 +28,9 @@ if not defined GOW3R_GAME_DIR set "GOW3R_GAME_DIR=..\CUSA01623 GoW3Remaster 1.02
 if not defined GOW3R_USER_DIR set "GOW3R_USER_DIR=%GOW3R_DATA_DIR%\user\CUSA01623"
 if not defined GOW3R_CONFIG set "GOW3R_CONFIG=%GOW3R_DATA_DIR%\gow3r.ini"
 if not defined GOW3R_TIMEOUT set "GOW3R_TIMEOUT=0"
-if not defined GOW3R_READBACKS set "GOW3R_READBACKS=0"
+if not defined GOW3R_READBACKS set "GOW3R_READBACKS=2"
 if not defined GOW3R_READBACK_LINEAR set "GOW3R_READBACK_LINEAR=1"
+if not defined GOW3R_DIRECT_MEMORY_ACCESS set "GOW3R_DIRECT_MEMORY_ACCESS=0"
 if not defined GOW3R_ALIAS_SYNC set "GOW3R_ALIAS_SYNC=1"
 if not defined BB_ASYNC_PIPELINES set "BB_ASYNC_PIPELINES=0"
 if not defined GOW3R_DMEM_MB set "GOW3R_DMEM_MB=7104"
@@ -40,6 +41,7 @@ if not defined GOW3R_OVERLAY set "GOW3R_OVERLAY=0"
 if not defined GOW3R_FULLSCREEN set "GOW3R_FULLSCREEN=0"
 if not defined GOW3R_PATCH_SKIP_INTRO set "GOW3R_PATCH_SKIP_INTRO=0"
 if not defined GOW3R_PATCH_SKIP_VIDEO set "GOW3R_PATCH_SKIP_VIDEO=0"
+if not defined GOW3R_PATCHES set "GOW3R_PATCHES=Bug Fix - Texture Corruption Fix"
 
 set "GAME=%GOW3R_GAME_DIR%"
 set "OUT=%GOW3R_DATA_DIR%\out"
@@ -85,8 +87,8 @@ if errorlevel 1 (
   exit /b 3
 )
 
-set "PATCH_NAMES="
-if "%GOW3R_PATCH_SKIP_INTRO%"=="1" set "PATCH_NAMES=Skip Intro"
+set "PATCH_NAMES=%GOW3R_PATCHES%"
+if "%GOW3R_PATCH_SKIP_INTRO%"=="1" set "PATCH_NAMES=!PATCH_NAMES!;Skip Intro"
 if "%GOW3R_PATCH_SKIP_VIDEO%"=="1" (
   if defined PATCH_NAMES (
     set "PATCH_NAMES=!PATCH_NAMES!;Skip Any Video With X Button"
@@ -94,11 +96,12 @@ if "%GOW3R_PATCH_SKIP_VIDEO%"=="1" (
     set "PATCH_NAMES=Skip Any Video With X Button"
   )
 )
-"%PYTHON%" scripts\patches.py --xml "patches\God_of_War_III_Remastered.xml" --app-version 01.02 --extra "!PATCH_NAMES!" --out "%OUT%"
+"%PYTHON%" scripts\patches.py --xml "patches\God_of_War_III_Remastered.xml" --app-version 01.02 --extra "!PATCH_NAMES!" --out "%OUT%" --runtime-env "%OUT%\patch-runtime.bat"
 if errorlevel 1 (
   echo [ERRO] Nao foi possivel preparar os patches selecionados.>&2
   exit /b 4
 )
+call "%OUT%\patch-runtime.bat"
 
 if not exist "out\gow3r-port.exe" call build.bat || exit /b !ERRORLEVEL!
 

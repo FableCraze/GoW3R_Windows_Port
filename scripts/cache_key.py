@@ -7,7 +7,7 @@ from pathlib import Path
 
 INPUTS = ('eboot.bin', 'sce_module/libc.prx', 'sce_module/libSceFios2.prx',
           'sce_sys/param.sfo')
-CACHE_SCHEMA = b'GOW3IMG1\0VIDEO-ARENA-2.25-GIB\0'
+CACHE_SCHEMA = b'GOW3IMG1\0UNPATCHED-LINK-XML-RUNTIME-PATCHES-V2\0'
 
 
 def cache_key(game):
