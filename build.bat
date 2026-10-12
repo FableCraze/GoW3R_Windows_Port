@@ -180,6 +180,11 @@ echo Build complete: out\gow3r-port.exe
 
 if "%~1"=="--test" (
     echo Running unit tests
+    cmake --build out/gpu --target audio-mix-test
+    if errorlevel 1 exit /b 1
+    out\audio-mix-test.exe
+    if errorlevel 1 exit /b 1
+
     gcc -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_win32_exception.c -o out/win32-exception-test.exe
     if errorlevel 1 exit /b 1
     out\win32-exception-test.exe

@@ -256,6 +256,16 @@ else()
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
+add_executable(audio-mix-test EXCLUDE_FROM_ALL ../tests/test_audio_mix.c)
+target_compile_options(audio-mix-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(audio-mix-test PRIVATE PkgConfig::SDL3)
+if (WIN32)
+    target_link_libraries(audio-mix-test PRIVATE winmm)
+else()
+    target_link_libraries(audio-mix-test PRIVATE pthread m)
+endif()
+set_target_properties(audio-mix-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../out")
+
 add_executable(shader-user-data-test EXCLUDE_FROM_ALL ../tests/test_shader_user_data.cpp)
 target_compile_options(shader-user-data-test PRIVATE -UNDEBUG)
 target_include_directories(shader-user-data-test PRIVATE shim shadps4 third_party/gcn/include)

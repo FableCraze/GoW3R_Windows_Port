@@ -34,7 +34,7 @@ def launch_options(resolution: str, fullscreen: bool, skip_intro: bool, skip_vid
         resolution = '1920x1080'
     width, height = resolution.split('x')
     if video_patch not in (*gow_patches.VIDEO_PROFILES, gow_patches.NO_VIDEO_PATCH):
-        raise ValueError(f'Patch de vídeo desconhecido: {video_patch}')
+        raise ValueError(f'Unknown video patch: {video_patch}')
     selected = [] if video_patch == gow_patches.NO_VIDEO_PATCH else [video_patch]
     if fps_120:
         selected.append(gow_patches.FPS_120)
@@ -95,7 +95,7 @@ class Launcher(tk.Tk):
                                     if 'GOW3R_PATCHES' in os.environ
                                     else bool(saved.get('fps_120', False))))
         self.patch_summary = tk.StringVar()
-        self.status = tk.StringVar(value='Selecione e valide o dump descriptografado.')
+        self.status = tk.StringVar(value='Select and validate your decrypted game dump.')
         self.process: subprocess.Popen | None = None
         self._build_ui()
         self.video_patch.trace_add('write', self.update_patch_controls)
@@ -107,46 +107,46 @@ class Launcher(tk.Tk):
         ttk.Label(frame, text='God of War III Remastered — Windows compatibility runtime',
                   font=('Segoe UI', 14, 'bold')).grid(row=0, column=0, columnspan=3,
                                                      sticky='w', pady=(0, 18))
-        ttk.Label(frame, text='Pasta do jogo').grid(row=1, column=0, sticky='w')
+        ttk.Label(frame, text='Game folder').grid(row=1, column=0, sticky='w')
         ttk.Entry(frame, textvariable=self.game).grid(row=2, column=0, columnspan=2,
                                                      sticky='ew', padx=(0, 8))
-        ttk.Button(frame, text='Selecionar…', command=self.pick_game).grid(row=2, column=2)
-        ttk.Label(frame, text='Dados do usuário / saves').grid(row=3, column=0,
+        ttk.Button(frame, text='Browse…', command=self.pick_game).grid(row=2, column=2)
+        ttk.Label(frame, text='User data / saves').grid(row=3, column=0,
                                                                sticky='w', pady=(14, 0))
         ttk.Entry(frame, textvariable=self.user).grid(row=4, column=0, columnspan=2,
                                                      sticky='ew', padx=(0, 8))
-        ttk.Button(frame, text='Selecionar…', command=self.pick_user).grid(row=4, column=2)
+        ttk.Button(frame, text='Browse…', command=self.pick_user).grid(row=4, column=2)
         options = ttk.Frame(frame)
         options.grid(row=5, column=0, columnspan=3, sticky='ew', pady=(18, 4))
-        patches = ttk.LabelFrame(options, text='Patches opcionais', padding=10)
+        patches = ttk.LabelFrame(options, text='Optional patches', padding=10)
         patches.pack(side='left', fill='both', expand=True, padx=(0, 8))
-        ttk.Label(patches, text='Texturas / resolução do jogo (selecione somente um)').pack(anchor='w')
+        ttk.Label(patches, text='Texture / game resolution (select one)').pack(anchor='w')
         ttk.Combobox(patches, textvariable=self.video_patch, values=self.video_patch_names,
                      state='readonly', width=43).pack(fill='x', pady=(4, 6))
         ttk.Label(patches, textvariable=self.patch_summary, wraplength=430).pack(anchor='w')
-        ttk.Button(patches, text='Detalhes do patch', command=self.show_patch_details).pack(
+        ttk.Button(patches, text='Patch details', command=self.show_patch_details).pack(
             anchor='w', pady=(6, 8))
-        ttk.Checkbutton(patches, text='Pular introdução', variable=self.skip_intro).pack(
+        ttk.Checkbutton(patches, text='Skip intro', variable=self.skip_intro).pack(
             anchor='w')
-        ttk.Checkbutton(patches, text='Pular qualquer vídeo com o botão X',
+        ttk.Checkbutton(patches, text='Skip any video with the X button',
                         variable=self.skip_video).pack(anchor='w', pady=(6, 0))
         ttk.Checkbutton(patches, text='120 FPS (VBlank 120 Hz)', variable=self.fps_120).pack(
             anchor='w', pady=(6, 0))
-        video = ttk.LabelFrame(options, text='Vídeo', padding=10)
+        video = ttk.LabelFrame(options, text='Video', padding=10)
         video.pack(side='left', fill='both', expand=True)
-        ttk.Label(video, text='Resolução do renderer').grid(row=0, column=0, sticky='w')
+        ttk.Label(video, text='Renderer resolution').grid(row=0, column=0, sticky='w')
         self.resolution_combo = ttk.Combobox(video, textvariable=self.resolution,
                                              values=RESOLUTIONS, state='readonly', width=14)
         self.resolution_combo.grid(row=1, column=0, sticky='w', pady=(4, 0))
-        ttk.Checkbutton(video, text='Tela cheia', variable=self.fullscreen).grid(
+        ttk.Checkbutton(video, text='Fullscreen', variable=self.fullscreen).grid(
             row=2, column=0, columnspan=2, sticky='w', pady=(8, 0))
         actions = ttk.Frame(frame)
         actions.grid(row=6, column=0, columnspan=3, sticky='w', pady=14)
-        ttk.Button(actions, text='Validar', command=self.validate).pack(side='left')
-        self.launch_button = ttk.Button(actions, text='Preparar e iniciar', command=self.launch)
+        ttk.Button(actions, text='Validate', command=self.validate).pack(side='left')
+        self.launch_button = ttk.Button(actions, text='Prepare and launch', command=self.launch)
         self.launch_button.pack(side='left', padx=8)
-        ttk.Button(actions, text='Abrir log', command=lambda: self.open_path(ROOT / 'gow3r.log')).pack(side='left')
-        ttk.Button(actions, text='Abrir relatórios', command=lambda: self.open_path(ROOT / 'out')).pack(side='left', padx=8)
+        ttk.Button(actions, text='Open log', command=lambda: self.open_path(ROOT / 'gow3r.log')).pack(side='left')
+        ttk.Button(actions, text='Open reports', command=lambda: self.open_path(ROOT / 'out')).pack(side='left', padx=8)
         ttk.Separator(frame).grid(row=7, column=0, columnspan=3, sticky='ew')
         ttk.Label(frame, textvariable=self.status, wraplength=690).grid(
             row=8, column=0, columnspan=3, sticky='w', pady=(14, 8))
@@ -166,10 +166,10 @@ class Launcher(tk.Tk):
                 self.resolution_combo.configure(values=(output,), state='disabled')
                 self.resolution.set(output)
             self.patch_summary.set(
-                f'Saída do jogo: {width}×{height}. Memória direta total: ao menos '
-                f'{5056 + additional} MiB ({additional} MiB adicionais), ajustada automaticamente.')
+                f'Game output: {width}×{height}. Total direct memory: at least '
+                f'{5056 + additional} MiB ({additional} MiB extra), adjusted automatically.')
         else:
-            self.patch_summary.set('Video Arena e resolução do jogo originais, sem patch gráfico.')
+            self.patch_summary.set('Original Video Arena and game resolution; no graphics patch.')
         if not resolution_patch:
             self.resolution_combo.configure(values=RESOLUTIONS, state='readonly')
             if self.resolution.get() not in RESOLUTIONS:
@@ -183,10 +183,10 @@ class Launcher(tk.Tk):
         for name in names:
             metadata = self.patch_catalog.get(name)
             if metadata:
-                details.append(f"{name}\nAutor: {metadata.get('Author', '')}\n"
+                details.append(f"{name}\nAuthor: {metadata.get('Author', '')}\n"
                                f"{metadata.get('Note', '')}")
         messagebox.showinfo('Patches — CUSA01623 01.02', '\n\n'.join(details)
-                            or 'Nenhum patch gráfico selecionado.')
+                            or 'No graphics patch selected.')
 
     def save_settings(self):
         data = {
@@ -203,17 +203,17 @@ class Launcher(tk.Tk):
             SETTINGS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n',
                                      encoding='utf-8')
         except OSError as error:
-            self.write(f'Não foi possível salvar as opções do launcher: {error}\n')
+            self.write(f'Could not save launcher settings: {error}\n')
 
     def pick_game(self):
-        path = filedialog.askdirectory(title='Pasta que contém eboot.bin',
+        path = filedialog.askdirectory(title='Game folder containing eboot.bin',
                                        initialdir=self.game.get() or ROOT.parent)
         if path:
             self.game.set(path)
             self.validate()
 
     def pick_user(self):
-        path = filedialog.askdirectory(title='Pasta de dados do usuário',
+        path = filedialog.askdirectory(title='User data folder',
                                        initialdir=self.user.get() or ROOT)
         if path:
             self.user.set(path)
@@ -225,11 +225,11 @@ class Launcher(tk.Tk):
         self.output.configure(state='disabled')
 
     def validate(self):
-        self.status.set('Calculando hash da imagem carregável…')
+        self.status.set('Calculating loadable image hash…')
         self.update_idletasks()
         result = game_check.inspect(Path(self.game.get()))
         if result['ok']:
-            self.status.set(f"Válido: CUSA01623 01.02 — {result['image_sha256']}")
+            self.status.set(f"Valid: CUSA01623 01.02 — {result['image_sha256']}")
             return True
         message = game_check.explain(result['kind'], result['title_id'], result['app_version'])
         self.status.set(message)
@@ -237,17 +237,17 @@ class Launcher(tk.Tk):
 
     def launch(self):
         if self.process and self.process.poll() is None:
-            messagebox.showinfo('GoW3R', 'O runtime já está em execução.')
+            messagebox.showinfo('GoW3R', 'The runtime is already running.')
             return
         if not self.validate():
-            messagebox.showerror('Dump incompatível', self.status.get())
+            messagebox.showerror('Incompatible game dump', self.status.get())
             return
         try:
             options = launch_options(self.resolution.get(), self.fullscreen.get(),
                                      self.skip_intro.get(), self.skip_video.get(),
                                      self.video_patch.get(), self.fps_120.get())
         except ValueError as error:
-            messagebox.showerror('Patches incompatíveis', str(error))
+            messagebox.showerror('Incompatible patches', str(error))
             return
         Path(self.user.get()).mkdir(parents=True, exist_ok=True)
         self.save_settings()
@@ -257,7 +257,7 @@ class Launcher(tk.Tk):
                    PYTHON=sys.executable, PYTHONUTF8='1', PYTHONIOENCODING='utf-8')
         env.update(options)
         self.launch_button.configure(state='disabled')
-        self.write('\nPreparando imagem e verificando contratos…\n')
+        self.write('\nPreparing image and checking runtime contracts…\n')
         self.process = subprocess.Popen([str(ROOT / 'run.bat'), self.game.get()], cwd=ROOT,
                                         env=env, stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, text=True,
@@ -269,7 +269,7 @@ class Launcher(tk.Tk):
         for line in self.process.stdout:
             self.after(0, self.write, line)
         code = self.process.wait()
-        self.after(0, self.status.set, f'Runtime encerrado com código {code}.')
+        self.after(0, self.status.set, f'Runtime exited with code {code}.')
         self.after(0, self.launch_button.configure, {'state': 'normal'})
 
     @staticmethod

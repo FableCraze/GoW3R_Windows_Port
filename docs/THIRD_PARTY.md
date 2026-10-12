@@ -5,6 +5,13 @@ from GPL-licensed projects.
 
 - The initial architecture was derived from `bloodborne_pc_windows_port`.
 - The graphics loader, shader recompiler, and PS4 libraries are derived from shadPS4.
+- The stereo AudioOut matrix and stereo-device detection are adapted from the
+  GPL-2.0-or-later cuesta4/shadPS4 `eltutz` snapshot, commit
+  `eb325fbd64c1696389b60813df125f517736573f`, file
+  `src/core/libraries/audio/sdl_audio_out.cpp` (Copyright 2024-2026 shadPS4
+  Emulator Project). Front channels use 1.0 gain;
+  center and surround channels use 0.7071; LFE is omitted. This port preserves
+  guest per-channel volumes rather than the fork's maximum-channel stream gain.
 - The vendored core snapshot and its backports are documented in
   [`gpu/VENDOR.txt`](../gpu/VENDOR.txt).
 

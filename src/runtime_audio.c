@@ -34,6 +34,7 @@
 
 typedef struct {
     int used, type, channels, is_float, frames, sample_bytes, std_layout;
+    int stereo_downmix, output_channels, output_sample_bytes;
     int32_t volume[8];
     SDL_AudioStream *stream;
     uint64_t next_deadline_ns; /* next return of sceAudioOutOutput */
@@ -63,6 +64,60 @@ static inline float soft_clip(float x) {
     if (x > 1.0f) return 1.0f - 1.0f / (1.0f + (x - 1.0f));
     if (x < -1.0f) return -1.0f + 1.0f / (1.0f + (-x - 1.0f));
     return x;
+}
+
+static int needs_stereo_downmix(int guest_channels, int device_channels) {
+    return guest_channels == 8 && device_channels >= 1 && device_channels <= 2;
+}
+
+/* Stereo matrix adapted from cuesta4/shadPS4 (GPL-2.0-or-later),
+ * src/core/libraries/audio/sdl_audio_out.cpp, Downmix{F32,S16}_8CHToStereoPS4.
+ * Fronts: 1.0; center/surrounds: 0.7071; LFE omitted, without normalization
+ * or per-sample limiting. Both PS4 layouts have the left surrounds at 4/6
+ * and the right surrounds at 5/7. Preserve the guest's per-channel volumes. */
+static size_t convert_port_audio(const Port *p, const void *data, void *converted) {
+    if (p->stereo_downmix) {
+        for (size_t f=0;f<(size_t)p->frames;++f) {
+            float ch[8];
+            for (int c=0;c<8;++c) {
+                size_t from=f*8+(size_t)c;
+                if (p->is_float) {
+                    memcpy(&ch[c],(const char *)data+from*4,4);
+                } else {
+                    int16_t v;
+                    memcpy(&v,(const char *)data+from*2,2);
+                    ch[c]=(float)v/32768.0f;
+                }
+                ch[c]*=(float)p->volume[c]/VOLUME_0DB;
+            }
+            float center=0.7071f*ch[2];
+            float stereo[2]={ch[0]+center+0.7071f*(ch[4]+ch[6]),
+                             ch[1]+center+0.7071f*(ch[5]+ch[7])};
+            memcpy((char *)converted+f*sizeof(stereo),stereo,sizeof(stereo));
+        }
+        return (size_t)p->frames*2*sizeof(float);
+    }
+    static const int remap[8]={0,1,2,3,6,7,4,5};
+    for (size_t f=0;f<(size_t)p->frames;++f) for (int c=0;c<p->channels;++c) {
+        int target=p->channels==8 && !p->std_layout ? remap[c] : c;
+        size_t from=f*(size_t)p->channels+(size_t)c, to=f*(size_t)p->channels+(size_t)target;
+        float gain=(float)p->volume[c]/VOLUME_0DB;
+        if (p->is_float) {
+            float v;
+            memcpy(&v,(const char *)data+from*4,4);
+            v=soft_clip(v*gain);
+            memcpy((char *)converted+to*4,&v,4);
+        } else {
+            int16_t v;
+            memcpy(&v,(const char *)data+from*2,2);
+            float fv=soft_clip(((float)v/32768.0f)*gain);
+            int32_t iv=(int32_t)(fv*32767.0f);
+            if (iv>32767) iv=32767; else if (iv<-32768) iv=-32768;
+            int16_t sv=(int16_t)iv;
+            memcpy((char *)converted+to*2,&sv,2);
+        }
+    }
+    return (size_t)p->frames*(size_t)p->channels*(size_t)p->sample_bytes;
 }
 
 static int sdl_audio(void) {
@@ -125,10 +180,21 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
     host_mutex_init(&p->lock);
     p->used=1; p->type=type; p->channels=channels[format]; p->is_float=format>=3 && format!=6;
     p->sample_bytes=p->is_float ? 4 : 2; p->frames=(int)length; p->std_layout=format>=6;
+    p->output_channels=p->channels; p->output_sample_bytes=p->sample_bytes;
     for (int c=0;c<8;++c) p->volume[c]=VOLUME_0DB;
     if (sdl_audio()) {
         SDL_AudioSpec spec={p->is_float ? SDL_AUDIO_F32 : SDL_AUDIO_S16, p->channels, 48000};
         p->stream=SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&spec,NULL,NULL);
+        SDL_AudioSpec device_spec;
+        if (p->stream && SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(p->stream),&device_spec,NULL)
+            && needs_stereo_downmix(p->channels,device_spec.channels)) {
+            p->stereo_downmix=1; p->output_channels=2; p->output_sample_bytes=4;
+            SDL_DestroyAudioStream(p->stream);
+            SDL_AudioSpec stereo_spec={SDL_AUDIO_F32,2,48000};
+            p->stream=SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&stereo_spec,NULL,NULL);
+            printf("Runtime: audio port %d uses cuesta4 8ch->stereo mix "
+                   "(front=1.0, center/surround=0.7071, LFE omitted)\n",id);
+        }
         if (p->stream) {
             SDL_ResumeAudioStreamDevice(p->stream);
             /* Prefill buffer periods of silence to give initial playback headroom (configurable via GOW3R_AUDIO_PREFILL, default 2) */
@@ -139,7 +205,7 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
                 if (pf >= 1 && pf <= 8) prefill_count = pf;
             }
             unsigned char silence[2048*8*4]={0};
-            size_t prefill_bytes=(size_t)p->frames*(size_t)p->channels*(size_t)p->sample_bytes*(size_t)prefill_count;
+            size_t prefill_bytes=(size_t)p->frames*(size_t)p->output_channels*(size_t)p->output_sample_bytes*(size_t)prefill_count;
             if (prefill_bytes<=sizeof(silence)) SDL_PutAudioStreamData(p->stream,silence,(int)prefill_bytes);
         } else {
             fprintf(stderr,"Runtime: SDL audio stream failed (%s); port %d uses the timer sink\n",SDL_GetError(),id);
@@ -149,7 +215,8 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
     const char *dump=getenv("GOW3R_AUDIO_DUMP");
     if (dump) {
         char path[4096];
-        snprintf(path,sizeof(path),"%s.port%d.%dch.%s",dump,id,p->channels,p->is_float ? "f32" : "s16");
+        snprintf(path,sizeof(path),"%s.port%d.%dch.%s",dump,id,p->output_channels,
+                 p->output_sample_bytes==4 ? "f32" : "s16");
         p->dump=fopen(path,"wb");
     }
     ++ports_opened;
@@ -190,32 +257,11 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
     }
 #endif
     host_lock(&p->lock);
-    size_t samples=(size_t)p->frames*(size_t)p->channels, bytes=samples*(size_t)p->sample_bytes;
+    size_t samples=(size_t)p->frames*(size_t)p->channels;
     uint64_t period=(uint64_t)p->frames*1000000000u/48000u;
     if (data) {
-        /* Apply per-channel volume, channel remap, and soft-knee saturation to prevent harsh clipping */
         unsigned char converted[2048*8*4];
-        static const int remap[8]={0,1,2,3,6,7,4,5};
-        float master_gain=(p->channels==8) ? 0.60f : 1.0f;
-        for (size_t f=0;f<(size_t)p->frames;++f) for (int c=0;c<p->channels;++c) {
-            int target=p->channels==8 && !p->std_layout ? remap[c] : c;
-            size_t from=f*(size_t)p->channels+(size_t)c, to=f*(size_t)p->channels+(size_t)target;
-            float gain=((float)p->volume[c]/VOLUME_0DB)*master_gain;
-            if (p->is_float) {
-                float v; memcpy(&v,(const char *)data+from*4,4);
-                v*=gain;
-                v=soft_clip(v);
-                memcpy(converted+to*4,&v,4);
-            } else {
-                int16_t v; memcpy(&v,(const char *)data+from*2,2);
-                float fv=((float)v/32768.0f)*gain;
-                fv=soft_clip(fv);
-                int32_t iv=(int32_t)(fv*32767.0f);
-                if (iv>32767) iv=32767; else if (iv<-32768) iv=-32768;
-                int16_t sv=(int16_t)iv;
-                memcpy(converted+to*2,&sv,2);
-            }
-        }
+        size_t bytes=convert_port_audio(p,data,converted);
         if (p->dump) fwrite(converted,1,bytes,p->dump);
 
         if (pace) {

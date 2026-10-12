@@ -18,7 +18,7 @@ if not defined PYTHON (
   for %%P in (python.exe py.exe) do if not defined PYTHON for /f "delims=" %%I in ('where %%P 2^>nul') do if not defined PYTHON set "PYTHON=%%I"
 )
 if not defined PYTHON (
-  echo [ERRO] Python 3.10 ou mais recente nao foi encontrado.>&2
+  echo [ERROR] Python 3.10 or newer was not found.>&2
   exit /b 1
 )
 
@@ -47,7 +47,7 @@ set "GAME=%GOW3R_GAME_DIR%"
 set "OUT=%GOW3R_DATA_DIR%\out"
 set "LOG=%GOW3R_DATA_DIR%\gow3r.log"
 if not exist "%GAME%\eboot.bin" (
-  echo [ERRO] eboot.bin nao encontrado em "%GAME%".>&2
+  echo [ERROR] eboot.bin was not found in "%GAME%".>&2
   exit /b 1
 )
 if not exist "%OUT%" mkdir "%OUT%"
@@ -61,7 +61,7 @@ set "CACHE_KEY_TMP=%OUT%\cache.key.tmp"
 if errorlevel 1 exit /b !ERRORLEVEL!
 set /p "CACHE_KEY="<"%CACHE_KEY_TMP%"
 if not defined CACHE_KEY (
-  echo [ERRO] Nao foi possivel calcular a chave do cache.>&2
+  echo [ERROR] Could not calculate the cache key.>&2
   exit /b 2
 )
 set "REBUILD=1"
@@ -71,19 +71,19 @@ if exist "%OUT%\boot-linked.bin" if exist "%OUT%\cache.key" (
 )
 
 if "!REBUILD!"=="1" (
-  echo Preparando imagem GOW3IMG1...
+  echo Preparing GOW3IMG1 image...
   "%PYTHON%" scripts\prepare.py "%GAME%" --out "%OUT%" || exit /b !ERRORLEVEL!
   "%PYTHON%" scripts\link_modules.py "%GAME%" --out "%OUT%" || exit /b !ERRORLEVEL!
   "%PYTHON%" scripts\content_profile.py "%GAME%" --out "%OUT%" --sku full || exit /b !ERRORLEVEL!
   move /y "%CACHE_KEY_TMP%" "%OUT%\cache.key" >nul
 ) else (
-  echo Cache GOW3IMG1 valido: !CACHE_KEY!
+  echo Valid GOW3IMG1 cache: !CACHE_KEY!
   del /q "%CACHE_KEY_TMP%" >nul 2>nul
 )
 
 "%PYTHON%" scripts\import_coverage.py "%OUT%\link.json" --out "%OUT%\coverage.json" --strict
 if errorlevel 1 (
-  echo [ERRO] Existem imports host sem contrato. Consulte "%OUT%\coverage.json".>&2
+  echo [ERROR] Unresolved host imports found. See "%OUT%\coverage.json".>&2
   exit /b 3
 )
 
@@ -98,15 +98,15 @@ if "%GOW3R_PATCH_SKIP_VIDEO%"=="1" (
 )
 "%PYTHON%" scripts\patches.py --xml "patches\God_of_War_III_Remastered.xml" --app-version 01.02 --extra "!PATCH_NAMES!" --out "%OUT%" --runtime-env "%OUT%\patch-runtime.bat"
 if errorlevel 1 (
-  echo [ERRO] Nao foi possivel preparar os patches selecionados.>&2
+  echo [ERROR] Could not prepare the selected patches.>&2
   exit /b 4
 )
 call "%OUT%\patch-runtime.bat"
 
 if not exist "out\gow3r-port.exe" call build.bat || exit /b !ERRORLEVEL!
 
-echo Iniciando God of War III Remastered. Log: "%LOG%"
+echo Launching God of War III Remastered. Log: "%LOG%"
 "out\gow3r-port.exe" "%OUT%\boot-linked.bin" --content-profile "%OUT%\content.bin" --app0 "%GAME%" --user "%GOW3R_USER_DIR%" --patches "%OUT%\patches.bin" --timeout "%GOW3R_TIMEOUT%" %2 %3 %4 %5 %6 %7 %8 %9 >>"%LOG%" 2>&1
 set "RESULT=!ERRORLEVEL!"
-echo Processo encerrado com codigo !RESULT!.
+echo Process exited with code !RESULT!.
 exit /b !RESULT!

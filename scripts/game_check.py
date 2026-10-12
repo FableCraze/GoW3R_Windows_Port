@@ -63,13 +63,13 @@ def problem(game, image_hash=None):
 
 
 def explain(kind, title, version):
-    found = f'Encontrado {title}, versão {version}.'
+    found = f'Found {title}, version {version}.'
     return {
-        'other_title': f'{found} Este port aceita somente CUSA01623.',
-        'wrong_version': f'{found} Mescle o update oficial 1.02 ao dump antes de iniciar.',
-        'wrong_eboot': f'{found} O eboot.bin não corresponde à imagem CUSA01623 1.02 suportada.',
-        'unreadable_sfo': 'Não foi possível ler sce_sys/param.sfo do dump descriptografado.',
-        'unreadable_eboot': f'{found} eboot.bin não é um SELF PS4 descriptografado compatível.',
+        'other_title': f'{found} This port only supports CUSA01623.',
+        'wrong_version': f'{found} Apply the official 1.02 update to the dump before launching.',
+        'wrong_eboot': f'{found} eboot.bin does not match the supported CUSA01623 1.02 image.',
+        'unreadable_sfo': 'Could not read sce_sys/param.sfo from the decrypted game dump.',
+        'unreadable_eboot': f'{found} eboot.bin is not a compatible decrypted PS4 SELF.',
     }[kind]
 
 

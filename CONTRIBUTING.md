@@ -1,20 +1,20 @@
-# Contribuindo
+# Contributing
 
-Obrigado pelo interesse no GoW3R Windows Port.
+Thank you for your interest in the GoW3R Windows Port.
 
-## Antes de enviar uma mudança
+## Before submitting a change
 
-1. Crie uma branch curta e focada.
-2. Não inclua arquivos ou derivados do jogo. Consulte `docs/GAME_FILES.md`.
-3. Preserve a licença GPL-2.0-or-later e a proveniência em `gpu/VENDOR.txt`.
-4. Adicione ou atualize testes para alterações de loader, runtime ou GPU.
-5. Execute os testes relacionados e descreva hardware, driver e cenário usado.
+1. Create a short, focused branch.
+2. Do not include game files or derived content. See `docs/GAME_FILES.md`.
+3. Preserve the GPL-2.0-or-later license and provenance in `gpu/VENDOR.txt`.
+4. Add or update tests for loader, runtime, or GPU changes.
+5. Run the relevant tests and describe the hardware, driver, and scenario used.
 
-## Relatos de bug
+## Bug reports
 
-Inclua versão do Windows, CPU, GPU, driver, commit testado, trecho relevante de
-`gow3r.log` e passos para reproduzir. Remova caminhos pessoais e não anexe ROM,
-PRX, WAD, XVAG, BSF, saves ou dumps de memória do jogo.
+Include the Windows version, CPU, GPU, driver, tested commit, relevant excerpts
+from `gow3r.log`, and reproduction steps. Remove personal paths. Do not attach
+ROMs, PRX, WAD, XVAG, BSF, save files, or game memory dumps.
 
-Para problemas gráficos, informe o ponto exato da campanha e se o defeito aparece
-desde o primeiro frame ou somente depois da transição de uma cutscene.
+For graphics issues, identify the exact point in the campaign and say whether the
+problem appears on the first frame or only after a cutscene transition.
