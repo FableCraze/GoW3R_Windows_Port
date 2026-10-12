@@ -98,3 +98,7 @@ for attribution and source-code provenance.
 
 See [LICENSE](LICENSE), [Third-party code and provenance](docs/THIRD_PARTY.md),
 and [gpu/VENDOR.txt](gpu/VENDOR.txt) for license, version, and backport details.
+
+## Acknowledgements
+
+We gratefully acknowledge the work and ideas of **MrSuS60** ([GitHub](https://github.com/Mrsuss60)), creator of [bloodborne_pc_windows_port](https://github.com/Mrsuss60/bloodborne_pc_windows_port), and **deadinside28** ([GitHub](https://github.com/deadinside28)), creator of [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc). These projects inspired the direction of GoW3R Windows Port, and this work would not have been possible without their contributions to the community. Thank you for making your work available to others.
