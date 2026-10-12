@@ -1,0 +1,507 @@
+/* libScePad on SDL3 gamepads, with a keyboard fallback. SDL events are pumped
+ * by the window thread (gpu/shim/window.cpp); here state is only sampled.
+ *
+ * Keyboard layout (when no gamepad is connected):
+ *   WASD left stick, arrow keys right stick, Space Cross, LShift Circle,
+ *   E Square, Q Triangle, 1 L1, 3 R1, R L2, F R2, Z L3, C R3,
+ *   Enter Options, Tab left touchpad, Backspace right touchpad,
+ *   IJKL d-pad (I up, K down, J left, L right). */
+#define _GNU_SOURCE
+#include "runtime.h"
+#include "gpu/bbgpu.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <time.h>
+#include <math.h>
+#include <SDL3/SDL.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#define ERR_INVALID_ARG ((int32_t)0x80920001)
+#define ERR_INVALID_HANDLE ((int32_t)0x80920003)
+#define ERR_ALREADY_OPENED ((int32_t)0x80920004)
+#define ERR_NOT_INITIALIZED ((int32_t)0x80920005)
+#define PAD_HANDLE 1
+
+enum {
+    BTN_L3=0x2, BTN_R3=0x4, BTN_OPTIONS=0x8, BTN_UP=0x10, BTN_RIGHT=0x20, BTN_DOWN=0x40, BTN_LEFT=0x80,
+    BTN_L2=0x100, BTN_R2=0x200, BTN_L1=0x400, BTN_R1=0x800, BTN_TRIANGLE=0x1000, BTN_CIRCLE=0x2000,
+    BTN_CROSS=0x4000, BTN_SQUARE=0x8000, BTN_TOUCHPAD=0x100000,
+};
+typedef struct { uint16_t x, y; uint8_t id, reserve[3]; } PadTouch;
+typedef struct {
+    uint32_t buttons;
+    uint8_t left_x, left_y, right_x, right_y;
+    uint8_t l2, r2, analog_padding[2];
+    float orientation[4], acceleration[3], angular_velocity[3];
+    uint8_t touch_count, touch_reserve[3];
+    uint32_t touch_held_time;
+    PadTouch touches[2];
+    uint8_t connected, pad0[3];
+    uint64_t timestamp;
+    uint8_t extension[16];
+    uint8_t connected_count, reserve[2], unique_length, unique[12];
+} PadData;
+typedef struct {
+    float pixel_density; uint16_t resolution_x, resolution_y;
+    uint8_t dead_zone_left, dead_zone_right, connection_type, connected_count;
+    uint8_t connected, pad[3];
+    int32_t device_class;
+    uint8_t reserve[8];
+} ControllerInfo;
+_Static_assert(sizeof(PadData)==120,"OrbisPadData layout");
+_Static_assert(sizeof(PadTouch)==8,"OrbisPadTouch layout");
+_Static_assert(__builtin_offsetof(PadData,touches)==60,"OrbisPadData touch offset");
+_Static_assert(__builtin_offsetof(PadData,timestamp)==80,"OrbisPadData timestamp offset");
+_Static_assert(sizeof(ControllerInfo)==28,"OrbisPadControllerInformation layout");
+
+static HostMutex lock = HOST_MUTEX_INIT;
+static int initialized, opened, sdl_ready;
+static SDL_Gamepad *gamepad;
+static size_t reads;
+static uint8_t connected_count;
+
+static uint64_t now_us(void) { return host_monotonic_ns() / 1000u; }
+static uint8_t axis(int16_t v) { int x=(v+32768)>>8; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
+static uint8_t trigger(int16_t v) { int x=v>>7; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
+static uint16_t touch_axis(float v, int max) {
+    return (uint16_t)(v<=0.0f ? 0 : v>=1.0f ? max : (int)(v*max+0.5f));
+}
+static void touch_click(PadData *d, int right) {
+    d->buttons|=BTN_TOUCHPAD;
+    d->touch_count=1;
+    d->touches[0]=(PadTouch){.x=right ? 1440 : 480,.y=471,.id=0};
+}
+
+/* Opens the first gamepad SDL knows about; called under lock. */
+static SDL_Gamepad *current_gamepad(void) {
+    if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
+    if (sdl_ready<0) return NULL;
+    if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
+    if (!gamepad) {
+        int count=0;
+        SDL_JoystickID *ids=SDL_GetGamepads(&count);
+        if (ids && count>0) {
+            gamepad=SDL_OpenGamepad(ids[0]);
+            if (gamepad) { ++connected_count; printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad)); }
+        }
+        SDL_free(ids);
+    }
+    return gamepad;
+}
+static void sample_host(PadData *d) {
+    memset(d,0,sizeof(*d));
+    d->left_x=d->left_y=d->right_x=d->right_y=128;
+    d->orientation[3]=1.0f;
+    d->connected=1; d->connected_count=connected_count ? connected_count : 1;
+    d->timestamp=now_us();
+    SDL_Gamepad *g=current_gamepad();
+    if (bbgpu_overlay_captures_input() || bbgpu_text_input_is_active()) return; /* settings menu open or typing: neutral input */
+    const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
+    if (g) {
+        static const struct { SDL_GamepadButton sdl; uint32_t ps; } map[]={
+            {SDL_GAMEPAD_BUTTON_SOUTH,BTN_CROSS}, {SDL_GAMEPAD_BUTTON_EAST,BTN_CIRCLE},
+            {SDL_GAMEPAD_BUTTON_WEST,BTN_SQUARE}, {SDL_GAMEPAD_BUTTON_NORTH,BTN_TRIANGLE},
+            {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,BTN_L1}, {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,BTN_R1},
+            {SDL_GAMEPAD_BUTTON_LEFT_STICK,BTN_L3}, {SDL_GAMEPAD_BUTTON_RIGHT_STICK,BTN_R3},
+            {SDL_GAMEPAD_BUTTON_START,BTN_OPTIONS}, {SDL_GAMEPAD_BUTTON_BACK,BTN_TOUCHPAD},
+            {SDL_GAMEPAD_BUTTON_TOUCHPAD,BTN_TOUCHPAD},
+            {SDL_GAMEPAD_BUTTON_DPAD_UP,BTN_UP}, {SDL_GAMEPAD_BUTTON_DPAD_DOWN,BTN_DOWN},
+            {SDL_GAMEPAD_BUTTON_DPAD_LEFT,BTN_LEFT}, {SDL_GAMEPAD_BUTTON_DPAD_RIGHT,BTN_RIGHT},
+        };
+        for (size_t i=0;i<sizeof(map)/sizeof(*map);++i) if (SDL_GetGamepadButton(g,map[i].sdl)) d->buttons|=map[i].ps;
+        d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
+        d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));
+        d->l2=trigger(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFT_TRIGGER)); d->r2=trigger(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
+        if (d->l2>30) d->buttons|=BTN_L2;
+        if (d->r2>30) d->buttons|=BTN_R2;
+        if (SDL_GetNumGamepadTouchpads(g)>0) {
+            const int fingers=SDL_GetNumGamepadTouchpadFingers(g,0);
+            for (int finger=0;finger<fingers && d->touch_count<2;++finger) {
+                bool down=false;
+                float x=0, y=0;
+                if (SDL_GetGamepadTouchpadFinger(g,0,finger,&down,&x,&y,NULL) && down) {
+                    d->touches[d->touch_count++]=(PadTouch){.x=touch_axis(x,1919),
+                        .y=touch_axis(y,942),.id=(uint8_t)finger};
+                }
+            }
+        }
+        // Back/Select on pads without a touch surface is a left-side click.
+        if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
+    }
+    if (!k) return;
+
+    // Souls PC Mouse & Keyboard integration
+    float mouse_dx = 0.0f, mouse_dy = 0.0f;
+    bbgpu_consume_mouse_delta(&mouse_dx, &mouse_dy);
+
+    float sens_x = 1.0f, sens_y = 1.0f, deadzone = 0.05f, smoothing = 0.2f;
+    int inv_x = 0, inv_y = 0;
+    const int mk_enabled = bbgpu_get_mk_config(&sens_x, &sens_y, &inv_x, &inv_y, &deadzone, &smoothing);
+
+    // Mouse Buttons
+    float mouse_x_pos = 0.0f, mouse_y_pos = 0.0f;
+    const SDL_MouseButtonFlags mouse_buttons = SDL_GetMouseState(&mouse_x_pos, &mouse_y_pos);
+    const bool lmb = (mouse_buttons & SDL_BUTTON_LMASK) != 0;
+    const bool rmb = (mouse_buttons & SDL_BUTTON_RMASK) != 0;
+    const bool mmb = (mouse_buttons & SDL_BUTTON_MMASK) != 0;
+
+    const bool lshift = k[SDL_SCANCODE_LSHIFT] || k[SDL_SCANCODE_RSHIFT];
+
+    if (mk_enabled) {
+        // Generic mouse and keyboard mapping to the DualShock ABI.
+        // LMB: R1; Shift + LMB: R2.
+        if (lshift && lmb) {
+            d->buttons |= BTN_R2;
+        } else if (lmb) {
+            d->buttons |= BTN_R1;
+        }
+
+        // RMB: L2; Shift + RMB or Tab: L1.
+        if (lshift && rmb) {
+            d->buttons |= BTN_L1;
+        } else if (rmb) {
+            d->buttons |= BTN_L2;
+        }
+        if (k[SDL_SCANCODE_TAB]) {
+            d->buttons |= BTN_L1;
+        }
+
+        // Middle mouse button or Q: R3.
+        if (mmb || k[SDL_SCANCODE_Q]) {
+            d->buttons |= BTN_R3;
+        }
+
+        // Keyboard Actions:
+        // Space: Circle.
+        if (k[SDL_SCANCODE_SPACE]) d->buttons |= BTN_CIRCLE;
+        // E or Enter: Cross.
+        if (k[SDL_SCANCODE_E] || k[SDL_SCANCODE_RETURN] || k[SDL_SCANCODE_KP_ENTER]) d->buttons |= BTN_CROSS;
+        // R: Square.
+        if (k[SDL_SCANCODE_R]) d->buttons |= BTN_SQUARE;
+        // F or V: Triangle.
+        if (k[SDL_SCANCODE_F] || k[SDL_SCANCODE_V]) d->buttons |= BTN_TRIANGLE;
+        // C or Z: L3.
+        if (k[SDL_SCANCODE_C] || k[SDL_SCANCODE_Z]) d->buttons |= BTN_L3;
+        // G: touchpad left.
+        if (k[SDL_SCANCODE_G]) touch_click(d, 0);
+        // Backspace: touchpad right.
+        if (k[SDL_SCANCODE_BACKSPACE]) touch_click(d, 1);
+        // Esc: Options.
+        if (k[SDL_SCANCODE_ESCAPE]) d->buttons |= BTN_OPTIONS;
+
+        // D-pad quick selection (arrow keys or 1, 2, 3, 4).
+        // 2 / Down: Cycle Equipped Consumable Item
+        // 3 / Left: Switch Left Hand Weapon (Firearm)
+        // 4 / Right: Switch Right Hand Trick Weapon
+        if (k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_1]) d->buttons |= BTN_UP;
+        if (k[SDL_SCANCODE_DOWN] || k[SDL_SCANCODE_2]) d->buttons |= BTN_DOWN;
+        if (k[SDL_SCANCODE_LEFT] || k[SDL_SCANCODE_3]) d->buttons |= BTN_LEFT;
+        if (k[SDL_SCANCODE_RIGHT] || k[SDL_SCANCODE_4]) d->buttons |= BTN_RIGHT;
+
+        // Movement (WASD -> Left Stick)
+        if (k[SDL_SCANCODE_A]) d->left_x = 0;
+        else if (k[SDL_SCANCODE_D]) d->left_x = 255;
+        if (k[SDL_SCANCODE_W]) d->left_y = 0;
+        else if (k[SDL_SCANCODE_S]) d->left_y = 255;
+
+        // Camera Look (Mouse Delta -> Right Stick with progressive acceleration)
+        static float filtered_dx = 0.0f;
+        static float filtered_dy = 0.0f;
+        filtered_dx = filtered_dx * smoothing + mouse_dx * (1.0f - smoothing);
+        filtered_dy = filtered_dy * smoothing + mouse_dy * (1.0f - smoothing);
+
+        float aim_x = filtered_dx * sens_x;
+        float aim_y = filtered_dy * sens_y;
+
+        if (inv_x) aim_x = -aim_x;
+        if (inv_y) aim_y = -aim_y;
+
+        // Compute polar magnitude for radial acceleration curve
+        float mag = sqrtf(aim_x * aim_x + aim_y * aim_y);
+        float stick_dx = 0.0f;
+        float stick_dy = 0.0f;
+
+        if (mag > 0.0001f) {
+            float norm_x = aim_x / mag;
+            float norm_y = aim_y / mag;
+
+            // Apply deadzone in normalized units
+            float eff_mag = mag;
+            if (eff_mag <= deadzone * 20.0f) {
+                eff_mag = 0.0f;
+            } else {
+                eff_mag = eff_mag - (deadzone * 20.0f);
+            }
+
+            if (eff_mag > 0.0f) {
+                // Progressive power acceleration curve:
+                // Small inputs (eff_mag < 1.0): dampened for fine aiming precision
+                // Large inputs (eff_mag > 1.0): accelerated for quick camera swipes
+                float accel_factor = 1.0f + 0.18f * eff_mag;
+                if (accel_factor > 3.2f) accel_factor = 3.2f;
+
+                float scaled_output = eff_mag * 7.5f * accel_factor;
+                if (scaled_output > 127.0f) scaled_output = 127.0f;
+
+                stick_dx = norm_x * scaled_output;
+                stick_dy = norm_y * scaled_output;
+            }
+        }
+
+        int stick_rx = 128 + (int)roundf(stick_dx);
+        int stick_ry = 128 + (int)roundf(stick_dy);
+        if (stick_rx < 0) stick_rx = 0; else if (stick_rx > 255) stick_rx = 255;
+        if (stick_ry < 0) stick_ry = 0; else if (stick_ry > 255) stick_ry = 255;
+
+        // Only override right stick if mouse delta was observed, allowing IJKL / arrow fallback
+        if (mouse_dx != 0.0f || mouse_dy != 0.0f || fabsf(filtered_dx) > 0.05f || fabsf(filtered_dy) > 0.05f) {
+            d->right_x = (uint8_t)stick_rx;
+            d->right_y = (uint8_t)stick_ry;
+        }
+    } else {
+        // Fallback layout when M&K mode is disabled
+        static const struct { SDL_Scancode key; uint32_t ps; } keys[]={
+            {SDL_SCANCODE_SPACE,BTN_CROSS}, {SDL_SCANCODE_RETURN,BTN_CROSS}, {SDL_SCANCODE_KP_ENTER,BTN_CROSS},
+            {SDL_SCANCODE_LSHIFT,BTN_CIRCLE}, {SDL_SCANCODE_ESCAPE,BTN_CIRCLE},
+            {SDL_SCANCODE_E,BTN_SQUARE}, {SDL_SCANCODE_Q,BTN_TRIANGLE},
+            {SDL_SCANCODE_1,BTN_L1}, {SDL_SCANCODE_3,BTN_R1},
+            {SDL_SCANCODE_R,BTN_L2}, {SDL_SCANCODE_F,BTN_R2},
+            {SDL_SCANCODE_Z,BTN_L3}, {SDL_SCANCODE_C,BTN_R3},
+            {SDL_SCANCODE_F1,BTN_OPTIONS}, {SDL_SCANCODE_O,BTN_OPTIONS},
+            {SDL_SCANCODE_UP,BTN_UP}, {SDL_SCANCODE_DOWN,BTN_DOWN},
+            {SDL_SCANCODE_LEFT,BTN_LEFT}, {SDL_SCANCODE_RIGHT,BTN_RIGHT},
+        };
+        for (size_t i=0;i<sizeof(keys)/sizeof(*keys);++i) if (k[keys[i].key]) d->buttons|=keys[i].ps;
+        if (k[SDL_SCANCODE_TAB]) touch_click(d,0);
+        if (k[SDL_SCANCODE_BACKSPACE]) touch_click(d,1);
+        if (k[SDL_SCANCODE_A]) d->left_x = 0;
+        else if (k[SDL_SCANCODE_D]) d->left_x = 255;
+        if (k[SDL_SCANCODE_W]) d->left_y = 0;
+        else if (k[SDL_SCANCODE_S]) d->left_y = 255;
+    }
+
+    if (k[SDL_SCANCODE_I]) d->right_y = 0;
+    else if (k[SDL_SCANCODE_K]) d->right_y = 255;
+    if (k[SDL_SCANCODE_J]) d->right_x = 0;
+    else if (k[SDL_SCANCODE_L]) d->right_x = 255;
+
+    if (d->buttons & BTN_L2) if (d->l2 < 255) d->l2=255;
+    if (d->buttons & BTN_R2) if (d->r2 < 255) d->r2=255;
+}
+
+/* GOW3R_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated
+ * tokens, re-read when it changes: button names (cross circle square triangle l1 r1 l2 r2 l3 r3
+ * options touchpad touchpad_left touchpad_right up down left right) are held while listed;
+ * touchpad defaults to a left-side click; lx= ly= rx= ry= (0..255) override
+ * the sticks. An empty file releases everything. */
+static struct { uint32_t buttons; int stick[4]; int touch_side; } injected={0,{-1,-1,-1,-1},-1};
+static int replay_armed;      /* 1 while a GOW3R_PAD_REPLAY recording plays, 2 once it ended */
+static uint64_t replay_start; /* 0: (re)start at the next sample */
+static void read_inject(void) {
+    static const char *path; static int checked; static uint64_t last_check;
+#ifndef _WIN32
+    static struct timespec mtime;
+#endif
+    if (!checked) { path=getenv("GOW3R_PAD_FILE"); checked=1; }
+    if (!path || !*path) return;
+    uint64_t now=now_us();
+    if (now-last_check<20000) return;
+    last_check=now;
+#ifdef _WIN32
+    static FILETIME last_ft;
+    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+    FILETIME ft;
+    GetFileTime(hFile, NULL, NULL, &ft);
+    CloseHandle(hFile);
+    if (ft.dwLowDateTime == last_ft.dwLowDateTime && ft.dwHighDateTime == last_ft.dwHighDateTime) return;
+    last_ft = ft;
+#else
+    if (stat(path,&st)!=0) return;
+    if (st.st_mtim.tv_sec==mtime.tv_sec && st.st_mtim.tv_nsec==mtime.tv_nsec) return;
+    mtime=st.st_mtim;
+#endif
+    FILE *f=fopen(path,"r");
+    if (!f) return;
+    static const struct { const char *name; uint32_t ps; } names[]={
+        {"cross",BTN_CROSS}, {"circle",BTN_CIRCLE}, {"square",BTN_SQUARE}, {"triangle",BTN_TRIANGLE},
+        {"l1",BTN_L1}, {"r1",BTN_R1}, {"l2",BTN_L2}, {"r2",BTN_R2}, {"l3",BTN_L3}, {"r3",BTN_R3},
+        {"options",BTN_OPTIONS}, {"touchpad",BTN_TOUCHPAD},
+        {"up",BTN_UP}, {"down",BTN_DOWN}, {"left",BTN_LEFT}, {"right",BTN_RIGHT},
+    };
+    static const char *sticks[]={"lx=","ly=","rx=","ry="};
+    injected.buttons=0;
+    injected.touch_side=-1;
+    for (int i=0;i<4;++i) injected.stick[i]=-1;
+    char token[64];
+    while (fscanf(f,"%63s",token)==1) {
+        if (!strcmp(token,"replay") && replay_armed!=1) { replay_armed=1; replay_start=0; } /* GOW3R_PAD_REPLAY */
+        if (!strcmp(token,"touchpad_left") || !strcmp(token,"touchpad_right")) {
+            injected.buttons|=BTN_TOUCHPAD;
+            injected.touch_side=!strcmp(token,"touchpad_right");
+        }
+        for (size_t i=0;i<sizeof(names)/sizeof(*names);++i) if (!strcmp(token,names[i].name)) injected.buttons|=names[i].ps;
+        for (int i=0;i<4;++i) if (!strncmp(token,sticks[i],3)) { int v=atoi(token+3); injected.stick[i]=v<0 ? 0 : v>255 ? 255 : v; }
+    }
+    fclose(f);
+    printf("Runtime: pad file: buttons 0x%x sticks %d %d %d %d\n",injected.buttons,
+           injected.stick[0],injected.stick[1],injected.stick[2],injected.stick[3]);
+}
+/* GOW3R_PAD_RECORD=<file>: F9 starts and stops recording the pad state (gamepad or keyboard) with
+ * the time since F9; GOW3R_PAD_REPLAY=<file> plays such a recording back, started by the token
+ * "replay" in GOW3R_PAD_FILE (scripted tests repeat a route the player ran once). Lines: ms buttons
+ * lx ly rx ry l2 r2, written when the state changes. */
+typedef struct { uint32_t ms, buttons; uint8_t axes[4], l2, r2; } PadSample;
+static FILE *record_file;
+static uint64_t record_start;
+static PadSample record_last;
+static void record_sample(const PadData *d) {
+    static const char *path; static int checked, f9_was_down;
+    if (!checked) { path=getenv("GOW3R_PAD_RECORD"); checked=1; }
+    if (!path || !*path || !sdl_ready) return;
+    const bool *k=SDL_GetKeyboardState(NULL);
+    const int f9=k && k[SDL_SCANCODE_F9];
+    if (f9 && !f9_was_down) {
+        if (record_file) {
+            fclose(record_file); record_file=NULL;
+            printf("Runtime: pad recording stopped (%s)\n",path);
+        } else if ((record_file=fopen(path,"w"))) {
+            record_start=now_us();
+            memset(&record_last,0xff,sizeof(record_last));
+            printf("Runtime: pad recording started (%s, F9 stops)\n",path);
+        }
+    }
+    f9_was_down=f9;
+    if (!record_file) return;
+    PadSample s={(uint32_t)((now_us()-record_start)/1000),d->buttons,
+                 {d->left_x,d->left_y,d->right_x,d->right_y},d->l2,d->r2};
+    if (s.buttons==record_last.buttons && !memcmp(s.axes,record_last.axes,4) &&
+        s.l2==record_last.l2 && s.r2==record_last.r2) return;
+    record_last=s;
+    fprintf(record_file,"%u %u %u %u %u %u %u %u\n",s.ms,s.buttons,s.axes[0],s.axes[1],s.axes[2],
+            s.axes[3],s.l2,s.r2);
+    fflush(record_file);
+}
+static PadSample *replay; static size_t replay_count, replay_next;
+static void replay_sample(PadData *d) {
+    if (!replay_armed) return;
+    if (!replay_start) {
+        static int loaded;
+        if (!loaded) {
+            loaded=1;
+            const char *path=getenv("GOW3R_PAD_REPLAY");
+            FILE *f=path ? fopen(path,"r") : NULL;
+            PadSample s; unsigned v[8]; size_t cap=0;
+            while (f && fscanf(f,"%u %u %u %u %u %u %u %u",&v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6],&v[7])==8) {
+                s=(PadSample){v[0],v[1],{(uint8_t)v[2],(uint8_t)v[3],(uint8_t)v[4],(uint8_t)v[5]},(uint8_t)v[6],(uint8_t)v[7]};
+                if (replay_count==cap && !(replay=realloc(replay,(cap=cap ? cap*2 : 1024)*sizeof(*replay)))) break;
+                replay[replay_count++]=s;
+            }
+            if (f) fclose(f);
+            printf("Runtime: pad replay of %zu samples from %s\n",replay_count,path ? path : "(unset)");
+        }
+        replay_start=now_us();
+        replay_next=0;
+    }
+    const uint32_t ms=(uint32_t)((now_us()-replay_start)/1000);
+    while (replay_next<replay_count && replay[replay_next].ms<=ms) ++replay_next;
+    if (!replay_next) return;
+    if (replay_next==replay_count && ms>replay[replay_count-1].ms+500) {
+        if (replay_armed==1) { puts("Runtime: pad replay finished"); replay_armed=2; }
+        return;
+    }
+    const PadSample *s=&replay[replay_next-1];
+    d->buttons=s->buttons;
+    d->left_x=s->axes[0]; d->left_y=s->axes[1]; d->right_x=s->axes[2]; d->right_y=s->axes[3];
+    d->l2=s->l2; d->r2=s->r2;
+}
+static void sample(PadData *d) {
+    sample_host(d);
+    if (bbgpu_overlay_captures_input() || bbgpu_text_input_is_active()) return;
+    record_sample(d);
+    read_inject();
+    replay_sample(d);
+    d->buttons|=injected.buttons;
+    if (injected.touch_side>=0) touch_click(d,injected.touch_side);
+    else if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
+    if (injected.buttons & BTN_L2) d->l2=255;
+    if (injected.buttons & BTN_R2) d->r2=255;
+    uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
+    for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
+}
+
+static ABI int32_t pad_init(void) { host_lock(&lock); initialized=1; host_unlock(&lock); return 0; }
+static ABI int32_t pad_open(int32_t user, int32_t type, int32_t index, const void *param) {
+    (void)param;
+    if (!initialized) return ERR_NOT_INITIALIZED;
+    if (user!=1) return ERR_INVALID_ARG;
+    if (type!=0 && type!=2) return ERR_INVALID_ARG; /* standard / special port */
+    if (index) return ERR_INVALID_ARG;
+    host_lock(&lock);
+    int already=opened; opened=1;
+    host_unlock(&lock);
+    if (already) return ERR_ALREADY_OPENED;
+    puts("Runtime: pad opened for user 1 (SDL gamepad or keyboard)");
+    return PAD_HANDLE;
+}
+static ABI int32_t pad_close(int32_t handle) {
+    if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
+    opened=0; return 0;
+}
+static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
+    if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
+    if (!data) return ERR_INVALID_ARG;
+    host_lock(&lock);
+    sample(data); ++reads;
+    host_unlock(&lock);
+    return 0;
+}
+/* Buffered read: the port samples once per call, so one entry is returned. */
+static ABI int32_t pad_read(int32_t handle, PadData *data, int32_t count) {
+    if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
+    if (!data || count<1 || count>64) return ERR_INVALID_ARG;
+    pad_read_state(handle,data);
+    return 1;
+}
+static ABI int32_t pad_info(int32_t handle, ControllerInfo *info) {
+    if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
+    if (!info) return ERR_INVALID_ARG;
+    memset(info,0,sizeof(*info));
+    info->pixel_density=44.86f; info->resolution_x=1920; info->resolution_y=943;
+    info->dead_zone_left=info->dead_zone_right=2;
+    info->connection_type=0; info->connected=1; info->device_class=0;
+    host_lock(&lock);
+    current_gamepad();
+    info->connected_count=connected_count ? connected_count : 1;
+    host_unlock(&lock);
+    return 0;
+}
+static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
+    if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
+    if (!param) return ERR_INVALID_ARG;
+    host_lock(&lock);
+    SDL_Gamepad *g=current_gamepad();
+    if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
+    host_unlock(&lock);
+    return 0;
+}
+static ABI int32_t pad_ok_handle(int32_t handle) { return handle==PAD_HANDLE && opened ? 0 : ERR_INVALID_HANDLE; }
+static ABI int32_t pad_ok_handle_flag(int32_t handle, uint8_t flag) { (void)flag; return pad_ok_handle(handle); }
+static ABI int32_t pad_lightbar(int32_t handle,const void *color) { (void)color; return pad_ok_handle(handle); }
+
+static const RuntimeExport exports[]={
+    {"scePadInit",pad_init}, {"scePadOpen",pad_open}, {"scePadClose",pad_close},
+    {"scePadReadState",pad_read_state}, {"scePadRead",pad_read},
+    {"scePadGetControllerInformation",pad_info}, {"scePadSetVibration",pad_vibration},
+    {"scePadResetOrientation",pad_ok_handle},
+    {"scePadSetAngularVelocityDeadbandState",pad_ok_handle_flag}, {"scePadSetTiltCorrectionState",pad_ok_handle_flag},
+    {"scePadSetMotionSensorState",pad_ok_handle_flag},
+    {"scePadSetLightBar",pad_lightbar}, {"scePadResetLightBar",pad_ok_handle},
+};
+uintptr_t runtime_pad_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
+void runtime_pad_report(void) { printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? SDL_GetGamepadName(gamepad) : "none"); }
